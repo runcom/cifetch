@@ -28,7 +28,6 @@ type dockerImage struct {
 	registry string
 	username string
 	password string
-	//client setup with auth and stuff
 }
 
 func (i *dockerImage) Kind() Kind {
@@ -78,7 +77,6 @@ func (i *dockerImage) getManifest() (manifest, error) {
 	// insecure by default for now
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	client := &http.Client{Transport: tr}
-	// set docker-api-version!!!! registry/2.0
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -101,6 +99,8 @@ func (i *dockerImage) getManifest() (manifest, error) {
 	}
 	return mschema1, nil
 }
+
+// TODO(runcom): abstract makeRequest(req, headers)
 
 func (i *dockerImage) GetLayers() ([]string, error) {
 	m, err := i.getManifest()

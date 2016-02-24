@@ -69,6 +69,7 @@ func (i *dockerImage) getManifest() (manifest, error) {
 		return nil, err
 	}
 	// TODO(runcom) set manifest version! schema1 for now - then schema2 etc etc and v1
+	// TODO(runcom) NO, switch on the resulter manifest like Docker is doing
 	req.Header.Set("Docker-Distribution-API-Version", "registry/2.0")
 	if pr.needsAuth() {
 		req.SetBasicAuth(i.username, i.password)

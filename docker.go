@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
+	"os"
+	"path"
 	"regexp"
+	"strings"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/cliconfig"
 	"github.com/docker/docker/reference"
 )
@@ -23,11 +28,13 @@ const (
 var validHex = regexp.MustCompile(`^([a-f0-9]{64})$`)
 
 type dockerImage struct {
-	ref      reference.Named
-	tag      string
-	registry string
-	username string
-	password string
+	ref             reference.Named
+	tag             string
+	registry        string
+	username        string
+	password        string
+	WWWAuthenticate string
+	scheme          string
 }
 
 func (i *dockerImage) Kind() Kind {
@@ -36,10 +43,13 @@ func (i *dockerImage) Kind() Kind {
 
 // will support v1 one day...
 type manifest interface {
+	String() string
 	GetLayers() []string
 }
 
 type manifestSchema1 struct {
+	Name     string
+	Tag      string
 	FSLayers []struct {
 		BlobSum string `json:"blobSum"`
 	} `json:"fsLayers"`
@@ -58,22 +68,27 @@ func (m *manifestSchema1) GetLayers() []string {
 	return layers
 }
 
-func (i *dockerImage) getManifest() (manifest, error) {
-	pr, err := ping(i.registry)
+func (m *manifestSchema1) String() string {
+	return fmt.Sprintf("%s-%s", sanitize(m.Name), sanitize(m.Tag))
+}
+
+func sanitize(s string) string {
+	return strings.Replace(s, "/", "-", -1)
+}
+
+func (i *dockerImage) makeRequest(method, url string, auth bool, headers map[string]string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("GET", pr.scheme+"://"+i.registry+"/v2/"+i.ref.RemoteName()+"/manifests/"+i.tag, nil)
-	fmt.Println(req.URL.String())
-	if err != nil {
-		return nil, err
-	}
-	// TODO(runcom) set manifest version! schema1 for now - then schema2 etc etc and v1
-	// TODO(runcom) NO, switch on the resulter manifest like Docker is doing
 	req.Header.Set("Docker-Distribution-API-Version", "registry/2.0")
-	if pr.needsAuth() {
-		req.SetBasicAuth(i.username, i.password)
-		// support Docker bearer and abstract makeRequest
+	for n, h := range headers {
+		req.Header.Add(n, h)
+	}
+	if auth {
+		if err := i.setupRequestAuth(req); err != nil {
+			return nil, err
+		}
 	}
 	// insecure by default for now
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
@@ -82,7 +97,131 @@ func (i *dockerImage) getManifest() (manifest, error) {
 	if err != nil {
 		return nil, err
 	}
+	return res, nil
+}
+
+func (i *dockerImage) setupRequestAuth(req *http.Request) error {
+	tokens := strings.SplitN(strings.TrimSpace(i.WWWAuthenticate), " ", 2)
+	if len(tokens) != 2 {
+		return fmt.Errorf("expected 2 tokens in WWW-Authenticate: %d, %s", len(tokens), i.WWWAuthenticate)
+	}
+	switch tokens[0] {
+	case "Basic":
+		req.SetBasicAuth(i.username, i.password)
+		return nil
+	case "Bearer":
+		// insecure by default for now
+		tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		client := &http.Client{Transport: tr}
+		res, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		hdr := res.Header.Get("WWW-Authenticate")
+		if hdr == "" || res.StatusCode != http.StatusUnauthorized {
+			// no need for bearer? wtf?
+			return nil
+		}
+		tokens = strings.Split(hdr, " ")
+		tokens = strings.Split(tokens[1], ",")
+		var realm, service, scope string
+		for _, token := range tokens {
+			if strings.HasPrefix(token, "realm") {
+				realm = strings.Trim(token[len("realm="):], "\"")
+			}
+			if strings.HasPrefix(token, "service") {
+				service = strings.Trim(token[len("service="):], "\"")
+			}
+			if strings.HasPrefix(token, "scope") {
+				scope = strings.Trim(token[len("scope="):], "\"")
+			}
+		}
+
+		if realm == "" {
+			return fmt.Errorf("missing realm in bearer auth challenge")
+		}
+		if service == "" {
+			return fmt.Errorf("missing service in bearer auth challenge")
+		}
+		// The scope can be empty if we're not getting a token for a specific repo
+		//if scope == "" && repo != "" {
+		if scope == "" {
+			return fmt.Errorf("missing scope in bearer auth challenge")
+		}
+		token, err := i.getBearerToken(realm, service, scope)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+		return nil
+	}
+	return fmt.Errorf("no handler for %s authentication", tokens[0])
+	// support docker bearer with authconfig's Auth string? see docker2aci
+}
+
+func (i *dockerImage) getBearerToken(realm, service, scope string) (string, error) {
+	authReq, err := http.NewRequest("GET", realm, nil)
+	if err != nil {
+		return "", err
+	}
+	getParams := authReq.URL.Query()
+	getParams.Add("service", service)
+	if scope != "" {
+		getParams.Add("scope", scope)
+	}
+	authReq.URL.RawQuery = getParams.Encode()
+	authReq.SetBasicAuth(i.username, i.password)
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	client := &http.Client{Transport: tr}
+	res, err := client.Do(authReq)
+	if err != nil {
+		return "", err
+	}
 	defer res.Body.Close()
+	switch res.StatusCode {
+	case http.StatusUnauthorized:
+		return "", fmt.Errorf("unable to retrieve auth token: 401 unauthorized")
+	case http.StatusOK:
+		break
+	default:
+		return "", fmt.Errorf("unexpected http code: %d, URL: %s", res.StatusCode, authReq.URL)
+	}
+	tokenBlob, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return "", err
+	}
+	tokenStruct := struct {
+		Token string `json:"token"`
+	}{}
+	if err := json.Unmarshal(tokenBlob, &tokenStruct); err != nil {
+		return "", err
+	}
+	// TODO(runcom): reuse tokens?
+	//hostAuthTokens, ok = rb.hostsV2AuthTokens[req.URL.Host]
+	//if !ok {
+	//hostAuthTokens = make(map[string]string)
+	//rb.hostsV2AuthTokens[req.URL.Host] = hostAuthTokens
+	//}
+	//hostAuthTokens[repo] = tokenStruct.Token
+	return tokenStruct.Token, nil
+}
+
+func (i *dockerImage) getManifest() (manifest, error) {
+	pr, err := ping(i.registry)
+	if err != nil {
+		return nil, err
+	}
+	i.WWWAuthenticate = pr.WWWAuthenticate
+	i.scheme = pr.scheme
+	url := i.scheme + "://" + i.registry + "/v2/" + i.ref.RemoteName() + "/manifests/" + i.tag
+	// TODO(runcom) set manifest version header! schema1 for now - then schema2 etc etc and v1
+	// TODO(runcom) NO, switch on the resulter manifest like Docker is doing
+	res, err := i.makeRequest("GET", url, pr.needsAuth(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
 	if res.StatusCode != http.StatusOK {
 		// print body also
 		return nil, fmt.Errorf("Invalid status code returned when fetching manifest %d", res.StatusCode)
@@ -101,17 +240,49 @@ func (i *dockerImage) getManifest() (manifest, error) {
 	return mschema1, nil
 }
 
-// TODO(runcom): abstract makeRequest(req, headers)
-
-func (i *dockerImage) GetLayers() ([]string, error) {
+func (i *dockerImage) GetLayers() error {
 	m, err := i.getManifest()
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	fmt.Println(m.GetLayers())
-
-	return nil, nil
+	tmpDir, err := ioutil.TempDir(".", "layers-"+m.String()+"-")
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(path.Join(tmpDir, "manifest.json"), data, 0644); err != nil {
+		return err
+	}
+	url := i.scheme + "://" + i.registry + "/v2/" + i.ref.RemoteName() + "/blobs/"
+	layers := m.GetLayers()
+	for _, l := range layers {
+		lurl := url + l
+		logrus.Infof("Downloading %s", lurl)
+		res, err := i.makeRequest("GET", lurl, i.WWWAuthenticate != "", nil)
+		if err != nil {
+			return err
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			// print url also
+			return fmt.Errorf("Invalid status code returned when fetching blob %d", res.StatusCode)
+		}
+		layerPath := path.Join(tmpDir, strings.Replace(l, "sha256:", "", -1)+".tar")
+		layerFile, err := os.Create(layerPath)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(layerFile, res.Body); err != nil {
+			return err
+		}
+		if err := layerFile.Sync(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func parseDockerImage(img string) (Image, error) {

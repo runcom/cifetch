@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Sirupsen/logrus"
 )
 
 type Kind int
@@ -16,7 +18,7 @@ const (
 
 type Image interface {
 	Kind() Kind
-	GetLayers() ([]string, error)
+	GetLayers() error
 }
 
 func parseImage(img string) (Image, error) {
@@ -32,10 +34,9 @@ func parseImage(img string) (Image, error) {
 func main() {
 	img, err := parseImage(os.Args[1])
 	if err != nil {
-		panic(err)
+		logrus.Fatal(err)
 	}
-	_, err = img.GetLayers()
-	if err != nil {
-		panic(err)
+	if err := img.GetLayers(); err != nil {
+		logrus.Fatal(err)
 	}
 }

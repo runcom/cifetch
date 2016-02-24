@@ -72,7 +72,7 @@ func (i *dockerImage) getManifest() (manifest, error) {
 	req.Header.Set("Docker-Distribution-API-Version", "registry/2.0")
 	if pr.needsAuth() {
 		req.SetBasicAuth(i.username, i.password)
-		// support Docker bearer
+		// support Docker bearer and abstract makeRequest
 	}
 	// insecure by default for now
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}

@@ -35,6 +35,15 @@ type dockerImage struct {
 	password        string
 	WWWAuthenticate string
 	scheme          string
+	rawManifest     []byte
+}
+
+func (i *dockerImage) GetRawManifest(version string) ([]byte, error) {
+	// TODO(runcom): unused version param for now, default to docker v2-1
+	if err := i.retrieveRawManifest(); err != nil {
+		return nil, err
+	}
+	return i.rawManifest, nil
 }
 
 func (i *dockerImage) Kind() Kind {
@@ -206,10 +215,13 @@ func (i *dockerImage) getBearerToken(realm, service, scope string) (string, erro
 	return tokenStruct.Token, nil
 }
 
-func (i *dockerImage) getManifest() (manifest, error) {
+func (i *dockerImage) retrieveRawManifest() error {
+	if i.rawManifest != nil {
+		return nil
+	}
 	pr, err := ping(i.registry)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	i.WWWAuthenticate = pr.WWWAuthenticate
 	i.scheme = pr.scheme
@@ -218,20 +230,28 @@ func (i *dockerImage) getManifest() (manifest, error) {
 	// TODO(runcom) NO, switch on the resulter manifest like Docker is doing
 	res, err := i.makeRequest("GET", url, pr.needsAuth(), nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
 		// print body also
-		return nil, fmt.Errorf("Invalid status code returned when fetching manifest %d", res.StatusCode)
+		return fmt.Errorf("Invalid status code returned when fetching manifest %d", res.StatusCode)
 	}
 	manblob, err := ioutil.ReadAll(res.Body)
 	if err != nil {
+		return err
+	}
+	i.rawManifest = manblob
+	return nil
+}
+
+func (i *dockerImage) getSchema1Manifest() (manifest, error) {
+	if err := i.retrieveRawManifest(); err != nil {
 		return nil, err
 	}
 	mschema1 := &manifestSchema1{}
-	if err := json.Unmarshal(manblob, mschema1); err != nil {
+	if err := json.Unmarshal(i.rawManifest, mschema1); err != nil {
 		return nil, err
 	}
 	if err := fixManifestLayers(mschema1); err != nil {
@@ -241,7 +261,7 @@ func (i *dockerImage) getManifest() (manifest, error) {
 }
 
 func (i *dockerImage) GetLayers() error {
-	m, err := i.getManifest()
+	m, err := i.getSchema1Manifest()
 	if err != nil {
 		return err
 	}

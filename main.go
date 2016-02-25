@@ -21,6 +21,7 @@ const (
 type Image interface {
 	Kind() Kind
 	GetLayers() error
+	GetRawManifest(version string) ([]byte, error)
 }
 
 func main() {

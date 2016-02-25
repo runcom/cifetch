@@ -1,16 +1,22 @@
 package main
 
 import (
-	"fmt"
-
+	"github.com/Sirupsen/logrus"
 	"github.com/codegangsta/cli"
 )
 
+// TODO(runcom): document args and usage
 var layersCommand = cli.Command{
 	Name:      "layers",
 	Usage:     "",
 	ArgsUsage: ``,
 	Action: func(context *cli.Context) {
-		fmt.Println("layers")
+		img, err := parseImage(context.Args().First())
+		if err != nil {
+			logrus.Fatal(err)
+		}
+		if err := img.GetLayers(); err != nil {
+			logrus.Fatal(err)
+		}
 	},
 }

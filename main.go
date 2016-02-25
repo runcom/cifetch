@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/codegangsta/cli"
 )
 
 type Kind int
@@ -14,6 +15,9 @@ const (
 	KindUnknown Kind = iota
 	KindDocker
 	KindAppc
+
+	version = "0.1.0-dev"
+	usage   = "fetch containers' images manifests and layers"
 )
 
 type Image interface {
@@ -32,11 +36,35 @@ func parseImage(img string) (Image, error) {
 }
 
 func main() {
-	img, err := parseImage(os.Args[1])
-	if err != nil {
+	app := cli.NewApp()
+	app.Name = "cifetch"
+	app.Version = version
+	app.Usage = usage
+	app.Flags = []cli.Flag{
+		cli.BoolFlag{
+			Name:  "debug",
+			Usage: "enable debug output",
+		},
+	}
+	app.Before = func(c *cli.Context) error {
+		if c.GlobalBool("debug") {
+			logrus.SetLevel(logrus.DebugLevel)
+		}
+		return nil
+	}
+	app.Commands = []cli.Command{
+		manifestCommand,
+		layersCommand,
+	}
+	if err := app.Run(os.Args); err != nil {
 		logrus.Fatal(err)
 	}
-	if err := img.GetLayers(); err != nil {
-		logrus.Fatal(err)
-	}
+
+	//img, err := parseImage(os.Args[1])
+	//if err != nil {
+	//logrus.Fatal(err)
+	//}
+	//if err := img.GetLayers(); err != nil {
+	//logrus.Fatal(err)
+	//}
 }

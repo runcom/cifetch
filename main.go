@@ -20,7 +20,7 @@ const (
 
 type Image interface {
 	Kind() Kind
-	GetLayers() error
+	GetLayers(layers []string) error
 	GetRawManifest(version string) ([]byte, error)
 }
 

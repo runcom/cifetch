@@ -15,7 +15,7 @@ var layersCommand = cli.Command{
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		if err := img.GetLayers(); err != nil {
+		if err := img.GetLayers(context.Args().Tail()); err != nil {
 			logrus.Fatal(err)
 		}
 	},

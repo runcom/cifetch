@@ -268,7 +268,7 @@ func (i *dockerImage) getSchema1Manifest() (manifest, error) {
 	return mschema1, nil
 }
 
-func (i *dockerImage) GetLayers() error {
+func (i *dockerImage) GetLayers(layers []string) error {
 	m, err := i.getSchema1Manifest()
 	if err != nil {
 		return err
@@ -285,8 +285,13 @@ func (i *dockerImage) GetLayers() error {
 		return err
 	}
 	url := i.scheme + "://" + i.registry + "/v2/" + i.ref.RemoteName() + "/blobs/"
-	layers := m.GetLayers()
+	if len(layers) == 0 {
+		layers = m.GetLayers()
+	}
 	for _, l := range layers {
+		if !strings.HasPrefix(l, "sha256:") {
+			l = "sha256:" + l
+		}
 		if err := i.getLayer(l, url, tmpDir); err != nil {
 			return err
 		}

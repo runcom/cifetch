@@ -287,28 +287,35 @@ func (i *dockerImage) GetLayers() error {
 	url := i.scheme + "://" + i.registry + "/v2/" + i.ref.RemoteName() + "/blobs/"
 	layers := m.GetLayers()
 	for _, l := range layers {
-		lurl := url + l
-		logrus.Infof("Downloading %s", lurl)
-		res, err := i.makeRequest("GET", lurl, i.WWWAuthenticate != "", nil)
-		if err != nil {
+		if err := i.getLayer(l, url, tmpDir); err != nil {
 			return err
 		}
-		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			// print url also
-			return fmt.Errorf("Invalid status code returned when fetching blob %d", res.StatusCode)
-		}
-		layerPath := path.Join(tmpDir, strings.Replace(l, "sha256:", "", -1)+".tar")
-		layerFile, err := os.Create(layerPath)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(layerFile, res.Body); err != nil {
-			return err
-		}
-		if err := layerFile.Sync(); err != nil {
-			return err
-		}
+	}
+	return nil
+}
+
+func (i *dockerImage) getLayer(l, url, tmpDir string) error {
+	lurl := url + l
+	logrus.Infof("Downloading %s", lurl)
+	res, err := i.makeRequest("GET", lurl, i.WWWAuthenticate != "", nil)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		// print url also
+		return fmt.Errorf("Invalid status code returned when fetching blob %d", res.StatusCode)
+	}
+	layerPath := path.Join(tmpDir, strings.Replace(l, "sha256:", "", -1)+".tar")
+	layerFile, err := os.Create(layerPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(layerFile, res.Body); err != nil {
+		return err
+	}
+	if err := layerFile.Sync(); err != nil {
+		return err
 	}
 	return nil
 }

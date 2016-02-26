@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,12 +11,13 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/docker/cliconfig"
-	"github.com/docker/docker/reference"
+	"github.com/docker/docker/pkg/homedir"
+	"github.com/runcom/cifetch/reference"
 )
 
 const (
@@ -23,6 +25,10 @@ const (
 	dockerHostname     = "docker.io"
 	dockerRegistry     = "registry-1.docker.io"
 	dockerAuthRegistry = "https://index.docker.io/v1/"
+
+	dockerCfg         = ".docker"
+	dockerCfgFileName = "config.json"
+	dockerCfgObsolete = ".dockercfg"
 )
 
 var validHex = regexp.MustCompile(`^([a-f0-9]{64})$`)
@@ -340,16 +346,81 @@ func parseDockerImage(img string) (Image, error) {
 	}, nil
 }
 
-func getAuth(hostname string) (string, string, error) {
-	cfgFile, err := cliconfig.Load(cliconfig.ConfigDir())
+func getDefaultConfigDir(confPath string) string {
+	conf := filepath.Join(homedir.Get(), confPath)
+	// if the directory doesn't exist, maybe we called docker with sudo
+	if _, err := os.Stat(conf); err != nil {
+		if os.IsNotExist(err) {
+			return filepath.Join(homedir.GetWithSudoUser(), confPath)
+		}
+	}
+	return conf
+}
+
+type DockerAuthConfigObsolete struct {
+	Auth string `json:"auth"`
+}
+
+type DockerAuthConfig struct {
+	Auth string `json:"auth,omitempty"`
+}
+
+type DockerConfigFile struct {
+	AuthConfigs map[string]DockerAuthConfig `json:"auths"`
+}
+
+func decodeDockerAuth(s string) (string, string, error) {
+	decoded, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
 		return "", "", err
 	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid auth configuration file")
+	}
+	user := parts[0]
+	password := strings.Trim(parts[1], "\x00")
+	return user, password, nil
+}
+
+func getAuth(hostname string) (string, string, error) {
 	if hostname == dockerHostname {
 		hostname = dockerAuthRegistry
 	}
-	if auth, ok := cfgFile.AuthConfigs[hostname]; ok {
-		return auth.Username, auth.Password, nil
+	dockerCfgPath := filepath.Join(getDefaultConfigDir(".docker"), dockerCfgFileName)
+	if _, err := os.Stat(dockerCfgPath); err == nil {
+		j, err := ioutil.ReadFile(dockerCfgPath)
+		if err != nil {
+			return "", "", err
+		}
+		var dockerAuth DockerConfigFile
+		if err := json.Unmarshal(j, &dockerAuth); err != nil {
+			return "", "", err
+		}
+		// try the normal case
+		if c, ok := dockerAuth.AuthConfigs[hostname]; ok {
+			return decodeDockerAuth(c.Auth)
+		}
+	} else if os.IsNotExist(err) {
+		oldDockerCfgPath := filepath.Join(getDefaultConfigDir(dockerCfgObsolete))
+		if _, err := os.Stat(oldDockerCfgPath); err != nil {
+			return "", "", nil //missing file is not an error
+		}
+		j, err := ioutil.ReadFile(oldDockerCfgPath)
+		if err != nil {
+			return "", "", err
+		}
+		var dockerAuthOld map[string]DockerAuthConfigObsolete
+		if err := json.Unmarshal(j, &dockerAuthOld); err != nil {
+			return "", "", err
+		}
+		if c, ok := dockerAuthOld[hostname]; ok {
+			return decodeDockerAuth(c.Auth)
+		}
+	} else {
+		// if file is there but we can't stat it for any reason other
+		// than it doesn't exist then stop
+		return "", "", fmt.Errorf("%s - %v", dockerCfgPath, err)
 	}
 	return "", "", nil
 }

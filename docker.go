@@ -185,7 +185,9 @@ func (i *dockerImage) getBearerToken(realm, service, scope string) (string, erro
 		getParams.Add("scope", scope)
 	}
 	authReq.URL.RawQuery = getParams.Encode()
-	authReq.SetBasicAuth(i.username, i.password)
+	if i.username != "" && i.password != "" {
+		authReq.SetBasicAuth(i.username, i.password)
+	}
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	client := &http.Client{Transport: tr}
 	res, err := client.Do(authReq)
